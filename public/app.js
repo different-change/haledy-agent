@@ -630,6 +630,7 @@ function renderConsent(req) {
     const mv = field ? releaseValue(name, value) : null;
     let grantable = !!field && field.model !== 'never' && mv != null;
     let sees;
+    let hero = false;
     if (!field) {
       sees = h('span', { class: 'sees' }, 'Not a vault field. It cannot be granted.');
     } else if (field.model === 'never') {
@@ -639,10 +640,13 @@ function renderConsent(req) {
       grantable = false;
     } else {
       sees = h('span', { class: 'sees' }, 'The AI would see: ', h('code', { text: mv }));
-      if (field.model === 'generalized' && String(value).trim() !== mv) sees.append(` (not ${String(value).trim()}: the full ZIP stays on this device)`);
+      if (field.model === 'generalized' && String(value).trim() !== mv) {
+        hero = true;
+        sees.append(' ', h('span', { class: 'not-full' }, '(not ', h('s', { text: String(value).trim() }), ': the full ZIP stays on this device)'));
+      }
     }
     const box = h('input', { type: 'checkbox', id, value: name, checked: grantable, disabled: !grantable });
-    list.append(h('li', { class: `consent-field${grantable ? '' : ' locked'}` }, box,
+    list.append(h('li', { class: `consent-field${grantable ? '' : ' locked'}${hero ? ' consent-hero' : ''}` }, box,
       h('label', { for: id }, h('span', { class: 'name', text: fieldLabel(name) }), sees)));
   }
 

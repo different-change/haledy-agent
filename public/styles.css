@@ -252,3 +252,54 @@ mark.hl-zip{background:#bcd6ef;color:#10304d;border-radius:3px;padding:0 3px;fon
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .server-grants{list-style:none;margin:0 0 6px;padding:0;display:flex;flex-direction:column;gap:4px}
+
+/* ---- Stage pass (TV demo, 2026-10-22) ---- */
+
+/* 1. Consent: the generalized ZIP is the hero row */
+.consent-field.consent-hero{background:var(--info-pale);border:2px solid var(--info);padding:14px 16px}
+.consent-hero .sees{font-size:1rem;color:var(--ink)}
+.consent-hero .sees code{font-size:1.9rem;line-height:1.1;padding:2px 12px;background:#fff;border:2px solid var(--info);border-radius:6px;vertical-align:middle;letter-spacing:.04em}
+.consent-hero .not-full{display:inline-block;margin-left:6px;font-weight:700;color:var(--info)}
+.consent-hero .not-full s{text-decoration-thickness:2px;text-decoration-color:var(--accent);color:var(--muted)}
+
+/* 2. Calm, visible progress while the agent works */
+.step-line.live{align-self:flex-start;padding:12px 18px 12px 16px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink);font-size:.95rem;box-shadow:0 1px 0 rgba(31,34,30,.04)}
+.step-line.live::before{width:16px;height:16px;border-radius:50%;background:none;border:2px solid var(--accent-pale);border-top-color:var(--accent);animation:spin .9s linear infinite}
+.step-line.live::after{display:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* 3. Obvious state after Approve / Fill / Deny: the card settles */
+.action-card{transition:border-color .3s,background .3s}
+.action-card:has(.done-note),.action-card:has(.filled){border-color:var(--ok);background:#fbfcf7}
+.action-card:has(.done-note) .consent-fields,.action-card:has(.done-note) .card-row,.action-card:has(.done-note) .card-actions,.action-card:has(.filled) .card-actions{opacity:.5}
+.action-card .done-note{display:flex;gap:10px;align-items:flex-start;margin-top:16px;padding:12px 16px;border-radius:8px;background:var(--ok-pale);color:var(--ok);line-height:1.45}
+.action-card .done-note::before{content:'✓';flex:none;display:grid;place-items:center;width:1.5em;height:1.5em;border-radius:50%;background:var(--ok);color:#fff;font-size:.9em}
+
+/* 4. Revoked grants read as revoked from across the room */
+.grant[data-status="revoked"]{border-left-color:var(--accent);opacity:1;background:var(--pale)}
+.grant[data-status="revoked"] .grant-fields{text-decoration:line-through;text-decoration-color:var(--accent);text-decoration-thickness:1.5px;font-weight:600;color:var(--muted)}
+.grant[data-status="revoked"] .countdown{font-family:var(--sans);font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;background:var(--accent);color:#fff;padding:3px 10px;border-radius:999px}
+.grant .countdown{font-size:1.25rem}
+
+/* 5. On a big screen, once the vault is open, give the conversation the stage */
+@media(min-width:1600px){
+  body:has(#vault-state.pill-open) .layout{grid-template-columns:minmax(360px,.62fr) minmax(0,1.7fr) minmax(440px,1fr)}
+  body:has(#vault-state.pill-open) .col-vault .col-head h2{white-space:nowrap}
+  body:has(#vault-state.pill-open) .col-vault .button{font-size:.85rem;padding:10px 14px}
+  body:has(#vault-state.pill-open) .col-vault .col-sub{font-size:.8rem}
+  body:has(#vault-state.pill-open) .col-vault .col-head h2{font-size:1.8rem}
+  body:has(#vault-state.pill-open) .editor .field{margin-bottom:8px}
+  body:has(#vault-state.pill-open) .editor input[type=text]{padding:6px 10px;font-size:.9rem}
+  body:has(#vault-state.pill-open) .editor .access{font-size:.72rem}
+  .col-chat{padding-left:40px;padding-right:40px}
+  .action-card{padding:26px 30px}
+  .action-card h3{font-size:2.3rem}
+  .action-card .purpose{font-size:1.1rem}
+  .consent-field .name{font-size:1.1rem}
+  .consent-field .sees{font-size:1rem}
+  .results-head h3{font-size:2.5rem}
+  .option{padding:20px 24px}
+  .option h4{font-size:1.4rem}
+  .rank{font-size:2.8rem}
+  .msg-agent{font-size:1.08rem}
+}
