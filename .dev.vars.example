@@ -1,0 +1,6 @@
+# Copy to .dev.vars and paste your own key. Never commit .dev.vars.
+# Without a key the agent runs in scripted mode (deterministic planner, same tool sequence).
+# A request can also force it with the header X-Haledy-Mode: scripted.
+ANTHROPIC_API_KEY=
+# Optional: override the model (default comes from wrangler.jsonc vars: claude-opus-5-5).
+# MODEL=claude-opus-5-5

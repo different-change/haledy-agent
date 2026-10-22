@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "haledy-agent",
+  "account_id": "2fa116408a86d801aded444ebfdcb9dd",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [{ "binding": "DB", "database_name": "haledy-agent", "database_id": "03b018b3-b90d-42f5-80fd-219c53dfaf28", "migrations_dir": "migrations" }],
+  "vars": { "MODEL": "claude-opus-5-5" },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

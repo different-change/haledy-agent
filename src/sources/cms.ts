@@ -1,0 +1,297 @@
+// CMS Provider Data Catalog: "National Downloadable File" (Doctors and Clinicians), dataset
+// mj5m-pzi6, metastore modified 2026-10-02. Medicare-enrolled clinicians only.
+// The live datastore API took 40-74 s per filtered query in recon on 2026-10-22 (and once
+// returned 503), far beyond an 8 s budget, so San Francisco uses a snapshot of the exact
+// public query below, fetched 2026-10-22; other cities try the live API and degrade.
+// Rows hold public provider data only: [npi, facility_name, address, zip5, phone,
+// ind_assgn (Y accepts Medicare assignment, M may accept), telehealth flag].
+import type { Evidence } from '../types.ts';
+import { USER_AGENT, TIMEOUT_MS, errorNote, formatPhone, titleCase } from './nppes.ts';
+
+export const CMS_DATASET = 'mj5m-pzi6';
+export const CMS_RELEASE = '2026-10-02';
+export const CMS_SNAPSHOT_FETCHED = '2026-10-22';
+const PRI_SPEC = 'PHYSICAL THERAPIST IN PRIVATE PRACTICE';
+
+export interface CmsRow {
+  npi: string;
+  facility: string;
+  address: string;
+  zip5: string;
+  phone: string;
+  assignment: string;
+  telehealth: boolean;
+}
+
+export function cmsQueryUrl(city: string): string {
+  const p = new URLSearchParams();
+  p.set('conditions[0][property]', 'citytown');
+  p.set('conditions[0][value]', city.toUpperCase());
+  p.set('conditions[0][operator]', '=');
+  p.set('conditions[1][property]', 'pri_spec');
+  p.set('conditions[1][value]', PRI_SPEC);
+  p.set('conditions[1][operator]', '=');
+  p.set('limit', '500');
+  p.set('count', 'true');
+  p.set('results', 'true');
+  p.set('schema', 'false');
+  return `https://data.cms.gov/provider-data/api/1/datastore/query/${CMS_DATASET}/0?${p.toString()}`;
+}
+
+type Tuple = [string, string, string, string, string, string, string];
+
+const SF_SNAPSHOT: Tuple[] = [
+  ["1013164169","ORIGIN PHYSICAL THERAPY CA INC","1800 FILBERT ST","94123","2138982673","M",""],
+  ["1013795962","ORIGIN PHYSICAL THERAPY CA INC","1800 FILBERT ST","94123","2138982673","M",""],
+  ["1023617156","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","1601 19TH AVE","94122","6284006471","Y",""],
+  ["1023617156","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","3400 LAGUNA ST","94123","6284006463","Y",""],
+  ["1023730579","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1023730579","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1023781788","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1023781788","SELECT CAL PHYSICAL THERAPY PC","402 DEWEY BLVD","94116","4152422444","M",""],
+  ["1033743935","RISING SUN PHYSICAL THERAPY, INC","500 SUTTER ST SUITE 518","94102","4152824083","Y",""],
+  ["1033926621","NORTH EAST MEDICAL SERVICES","728 PACIFIC AVE SUITE 301","94133","4154333318","Y",""],
+  ["1043836547","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1083332456","MOTION SF PHYSICAL THERAPY INC","1202 VICENTE ST","94116","4153353992","Y",""],
+  ["1083376917","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","3400 LAGUNA ST","94123","6284006463","Y",""],
+  ["1083593636","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1093800229","","2299 POST ST","94115","4159297677","Y",""],
+  ["1104586734","MOTION SF PHYSICAL THERAPY INC","1202 VICENTE ST","94116","4153353992","Y",""],
+  ["1114180338","DLJPT INC","681 PORTOLA DR","94127","4156646492","Y",""],
+  ["1114572690","","169 APOLLO ST","94124","","M",""],
+  ["1114889235","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1124150230","UCSF MEDICAL GROUP BUSINESS SERVICES","400 PARNASSUS AVE","94143","","Y",""],
+  ["1124569264","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","3400 LAGUNA ST","94123","6284006463","Y",""],
+  ["1124736517","AMBER REHABILITATION INC","1200 GOUGH ST SUITE 400","94109","","Y",""],
+  ["1124738828","PERMANENTE MEDICAL GROUP INC","1635 DIVISADERO ST","94115","4158333780","Y",""],
+  ["1124867205","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1164142899","ORIGIN PHYSICAL THERAPY CA INC","1800 FILBERT ST","94123","2138982673","M",""],
+  ["1164509907","SHASTA HEALTH PHYSICAL THERAPY PC","2261 MARKET ST","94114","8332709820","Y",""],
+  ["1184931321","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1205106721","SHASTA HEALTH PHYSICAL THERAPY PC","2261 MARKET ST","94114","8332709820","Y",""],
+  ["1205330701","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1215246186","PERMANENTE MEDICAL GROUP INC","1635 DIVISADERO ST","94115","4158333780","Y",""],
+  ["1225709199","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1225909922","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1235227869","","1121 GEARY BLVD","94109","4152028788","Y",""],
+  ["1255052452","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1275222770","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1275998932","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1275998932","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1285334409","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1285340372","","1700 CALIFORNIA ST SUITE 530","94109","","M",""],
+  ["1285715821","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1285775395","","220 MONTGOMERY ST SUITE 110","94104","4159864979","Y",""],
+  ["1316509557","","1640 VALENCIA ST SUITE 2C","94110","4085046045","Y",""],
+  ["1316620206","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1316628928","","3222 GEARY BLVD","94118","","M",""],
+  ["1316797947","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1336016518","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1336152131","NOE VALLEY PHYSICAL THERAPY","1579 SANCHEZ ST","94131","4158214148","Y",""],
+  ["1336573054","","1655 TARAVAL ST","94116","4158583391","Y",""],
+  ["1336864438","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1336864438","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1356127765","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1356408892","DLJPT INC","681 PORTOLA DR","94127","4156646492","Y",""],
+  ["1356494108","G SPORTS PHYSICAL THERAPY, INC.","22 BATTERY ST SUITE 888","94111","4157325608","Y","Y"],
+  ["1356585012","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","1601 19TH AVE","94122","6284006471","Y","Y"],
+  ["1356585012","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","3400 LAGUNA ST","94123","6284006463","Y","Y"],
+  ["1356715106","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1366865701","","20 SYCAMORE ST","94110","4158395221","Y",""],
+  ["1407046667","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1417490475","ORTHOPAEDIC AND NEUROLOGICAL REHAB INC","1601 19TH AVE","94122","6284006471","Y",""],
+  ["1437302791","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1437302791","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1437835527","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1447070842","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1447070842","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1457639288","G SPORTS PHYSICAL THERAPY, INC.","470 3RD ST","94107","4153560800","Y",""],
+  ["1457832578","ORIGIN PHYSICAL THERAPY CA INC","1800 FILBERT ST","94123","2138982673","M",""],
+  ["1467288282","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1477362846","","1700 CALIFORNIA ST SUITE 530","94109","","M",""],
+  ["1477648103","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1477648103","PRESIDIO SPORT AND MEDICINE, INC.","1162 GORGAS AVE B","94129","","Y",""],
+  ["1477650562","UCSF MEDICAL GROUP BUSINESS SERVICES","400 PARNASSUS AVE","94143","","Y",""],
+  ["1477655769","AMBER REHABILITATION INC","1200 GOUGH ST SUITE 400","94109","","Y",""],
+  ["1508633009","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1508633009","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1518031566","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1538109210","RISING SUN PHYSICAL THERAPY, INC","500 SUTTER ST SUITE 518","94102","4152824083","Y",""],
+  ["1538607908","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1538607908","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1538695473","","490 BROADWAY","94133","4159062055","Y",""],
+  ["1538695473","","667 CHENERY ST","94131","4159062055","Y",""],
+  ["1538754288","SAND COAST REHAB PHYSICAL THERAPY INC","1525 POST ST","94109","3012688134","Y",""],
+  ["1548741457","AGILE PHYSICAL THERAPY INC","100 BUSH ST SUITE 800","94104","6505658090","Y",""],
+  ["1558025841","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1568188464","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1568558260","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1568603025","","483 PINE ST","94104","4158729376","Y",""],
+  ["1578099826","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1578118824","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1578339396","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1578339396","SELECT CAL PHYSICAL THERAPY PC","402 DEWEY BLVD","94116","4152422444","M",""],
+  ["1578659207","MMT PHYSICAL THERAPY INC","3040 LARKIN ST","94109","4158142669","Y",""],
+  ["1588329197","NORTH EAST MEDICAL SERVICES","1520 STOCKTON ST","94133","4153919686","Y",""],
+  ["1588329197","NORTH EAST MEDICAL SERVICES","82 LELAND AVE","94134","4153919688","Y",""],
+  ["1598650962","SELECT CAL PHYSICAL THERAPY PC","3222 GEARY BLVD","94118","4158314658","M",""],
+  ["1598839367","LISA M GIANNONE ET AL PTR","3019 GEARY BLVD","94118","4153876564","Y",""],
+  ["1609925155","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1619514221","LYON-MARTIN COMMUNITY HEALTH SERVICES","1735 MISSION ST","94103","4155657667","Y",""],
+  ["1629895552","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1639625601","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1649441262","PERMANENTE MEDICAL GROUP INC","2200 OFARRELL ST","94115","4158332000","Y",""],
+  ["1649441262","PERMANENTE MEDICAL GROUP INC","2238 GEARY BLVD","94115","4158332200","Y",""],
+  ["1649679689","","","94122","6502919898","Y",""],
+  ["1649870908","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1659137784","THERAPYDIA CALIFORNIA PHYSICAL THERAPY P C","1 EMBARCADERO CTR LBBY LEVEL","94111","4177993300","Y",""],
+  ["1679638662","SUTTER BAY MEDICAL FOUNDATION","3838 CALIFORNIA ST","94118","","Y",""],
+  ["1679646723","","1360 9TH AVE SUITE 210","94122","4155287188","Y",""],
+  ["1689145872","REGENTS OF THE UNIVERSITY OF CALIFORNIA - UCSF","505 PARNASSUS AVE","94143","4154761000","Y",""],
+  ["1699219493","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1699266007","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1699296822","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1699943530","","44 GOUGH ST SUITE 308","94103","4155247390","M",""],
+  ["1710799564","NORTH EAST MEDICAL SERVICES","1520 STOCKTON ST","94133","4153919686","Y",""],
+  ["1710990528","NOE VALLEY PHYSICAL THERAPY","1579 SANCHEZ ST","94131","4158214148","Y",""],
+  ["1740007335","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1740166032","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1740895192","THERAPYDIA CALIFORNIA PHYSICAL THERAPY P C","1 EMBARCADERO CTR LBBY LEVEL","94111","4177993300","Y",""],
+  ["1760992531","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1770009151","GOLDEN GATE PHYSICAL THERAPY","1801 BUSH ST SUITE 200","94109","4157761646","M",""],
+  ["1770655334","","2238 UNION ST","94123","4157775009","M",""],
+  ["1780446393","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1790261345","MOTION SF PHYSICAL THERAPY INC","1202 VICENTE ST","94116","4153353992","Y",""],
+  ["1801336854","MOTION SF PHYSICAL THERAPY INC","1202 VICENTE ST","94116","4153353992","Y",""],
+  ["1811305550","AMBER REHABILITATION INC","1200 GOUGH ST SUITE 400","94109","","Y","Y"],
+  ["1821142340","NOE VALLEY PHYSICAL THERAPY","1579 SANCHEZ ST","94131","4158214148","Y",""],
+  ["1821691296","RENEW PHYSICAL THERAPY PC","659 COMMERCIAL ST SUITE 101","94111","4159048707","Y",""],
+  ["1821776139","","4200 18TH ST SUITE 102","94114","4156261929","Y",""],
+  ["1821924036","","149 MARVIEW WAY","94131","","M",""],
+  ["1821924036","","550 15TH ST SUITE 36A","94103","","M",""],
+  ["1821924036","","550 15TH ST SUITE 36A","94103","","M",""],
+  ["1821974080","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1831257773","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1831964659","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1831964659","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1841015518","G SPORTS PHYSICAL THERAPY, INC.","22 BATTERY ST SUITE 888","94111","4157325608","Y",""],
+  ["1841774114","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1861144693","MOTION SF PHYSICAL THERAPY INC","1202 VICENTE ST","94116","4153353992","Y",""],
+  ["1861151078","G SPORTS PHYSICAL THERAPY, INC.","470 3RD ST","94107","4153560800","Y",""],
+  ["1861362584","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1861697922","","245 A CLEMENT ST SUITE 206","94118","4152974113","Y",""],
+  ["1871374538","PRENDERGAST AND RUMMER PHYS THERAPY PELVIC HEALTH AND REHABILIATION CT","2000 VAN NESS AVE SUITE 603","94109","4154407600","M",""],
+  ["1881768646","LISA M GIANNONE ET AL PTR","3019 GEARY BLVD","94118","4153876564","Y",""],
+  ["1891640447","THERAPYDIA CALIFORNIA PHYSICAL THERAPY P C","1 EMBARCADERO CTR LBBY LEVEL","94111","4177993300","Y",""],
+  ["1902176936","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1902629819","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","Y",""],
+  ["1902629819","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","Y",""],
+  ["1912214636","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1912906892","","","94117","5612519200","Y",""],
+  ["1922732718","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1942743307","","2121 19TH AVE SUITE 100","94116","4155051767","M",""],
+  ["1942743307","INNER BAR INC","3401 TARAVAL ST","94116","4156829902","M",""],
+  ["1942743307","INNER BAR INC","550 15TH ST SUITE 36A","94103","4156829902","M",""],
+  ["1942886767","REGENTS UNIV OF CALIFORNIA UCSF","505 PARNASSUS AVE","94143","4154761000","M",""],
+  ["1962642454","THERAPYDIA CALIFORNIA PHYSICAL THERAPY P C","1 EMBARCADERO CTR LBBY LEVEL","94111","4177993300","Y",""],
+  ["1972047736","SAND COAST REHAB PHYSICAL THERAPY INC","1525 POST ST","94109","3012688134","Y",""],
+  ["1972226801","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+  ["1972450393","","1471 15TH ST APT 6","94103","","M",""],
+  ["1982173506","MMT PHYSICAL THERAPY INC","3040 LARKIN ST","94109","4158142669","Y",""],
+  ["1982352902","SELECT CAL PHYSICAL THERAPY PC","1700 CALIFORNIA ST SUITE 530","94109","4159211758","M",""],
+  ["1982370581","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1982436762","AGILE PHYSICAL THERAPY INC","2191 MARKET ST SUITE C","94114","6505658090","Y",""],
+  ["1982570644","SELECT CAL PHYSICAL THERAPY PC","3222 GEARY BLVD","94118","4158314658","M",""],
+  ["1982720942","","1124 CLEMENT ST","94118","4155923937","M",""],
+  ["1992467153","PRESIDIO SPORT AND MEDICINE, INC.","1162 B GORGAS AVE","94129","4155616655","Y",""],
+  ["1992521611","THERAPYDIA CALIFORNIA PHYSICAL THERAPY P C","1 EMBARCADERO CTR LBBY LEVEL","94111","4177993300","Y",""],
+  ["1992570196","SELECT CAL PHYSICAL THERAPY PC","3129 VICENTE ST","94116","4156611057","M",""],
+];
+
+function fromTuple(t: Tuple): CmsRow {
+  return { npi: t[0], facility: t[1], address: t[2], zip5: t[3], phone: t[4], assignment: t[5], telehealth: t[6] === 'Y' };
+}
+
+interface CmsApiRow {
+  npi?: string;
+  facility_name?: string;
+  adr_ln_1?: string;
+  adr_ln_2?: string;
+  zip_code?: string;
+  telephone_number?: string;
+  ind_assgn?: string;
+  telehlth?: string;
+}
+
+export interface CmsResult {
+  rows: CmsRow[];
+  url: string;
+  ok: boolean;
+  mode: 'snapshot' | 'live' | 'failed';
+  note?: string;
+}
+
+/** Medicare-enrolled physical therapists in a city. Never throws. */
+export async function cmsClinicians(city: string, state: string): Promise<CmsResult> {
+  const url = cmsQueryUrl(city);
+  if (city.trim().toUpperCase() === 'SAN FRANCISCO' && state.trim().toUpperCase() === 'CA') {
+    return {
+      rows: SF_SNAPSHOT.map(fromTuple),
+      url,
+      ok: true,
+      mode: 'snapshot',
+      note: `Snapshot of this query fetched ${CMS_SNAPSHOT_FETCHED} (dataset release ${CMS_RELEASE}); the live API takes 40-70 s. Medicare-enrolled clinicians only.`,
+    };
+  }
+  try {
+    const res = await fetch(url, { headers: { accept: 'application/json', 'user-agent': USER_AGENT }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (!res.ok) throw new Error(`HTTP ${res.status} from data.cms.gov`);
+    const body = (await res.json()) as { results?: CmsApiRow[] };
+    const rows = (body.results || []).map(r => ({
+      npi: String(r.npi || ''),
+      facility: r.facility_name || '',
+      address: [r.adr_ln_1, r.adr_ln_2].filter(Boolean).join(' '),
+      zip5: String(r.zip_code || '').slice(0, 5),
+      phone: r.telephone_number || '',
+      assignment: r.ind_assgn || '',
+      telehealth: r.telehlth === 'Y',
+    }));
+    return { rows, url, ok: true, mode: 'live', note: 'Medicare-enrolled clinicians only.' };
+  } catch (err) {
+    return { rows: [], url, ok: false, mode: 'failed', note: `CMS Doctors and Clinicians: ${errorNote(err)}; enrichment skipped.` };
+  }
+}
+
+/** Normalised street key for matching an organisation's NPPES address to CMS rows. */
+export function addressKey(street: string, zip: string): string {
+  const s = String(street || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\b(SUITE|STE|UNIT|FL|FLOOR)\b.*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const words = s.split(' ').slice(0, 3).join(' ');
+  return `${words}|${String(zip || '').slice(0, 5)}`;
+}
+
+export function cmsEvidenceForIndividual(row: CmsRow, url: string): Evidence {
+  const assign = row.assignment === 'Y' ? 'accepts Medicare assignment' : row.assignment === 'M' ? 'may accept Medicare assignment' : 'Medicare assignment not stated';
+  const group = row.facility ? `practising with ${titleCase(row.facility)}` : 'no group listed';
+  return {
+    source: 'CMS Doctors and Clinicians (National Downloadable File)',
+    claim: `Medicare-enrolled physical therapist, ${group} at ${titleCase(row.address)} ${row.zip5}; phone ${formatPhone(row.phone) || 'not listed'}; ${assign}${row.telehealth ? '; offers telehealth' : ''}. Says nothing about commercial or BlueCard networks.`,
+    asOf: CMS_RELEASE,
+    url,
+  };
+}
+
+export function cmsEvidenceForOrganization(rows: CmsRow[], url: string): Evidence {
+  const groups = [...new Set(rows.map(r => r.facility).filter(Boolean))].map(titleCase);
+  const phones = [...new Set(rows.map(r => formatPhone(r.phone)).filter(Boolean))];
+  return {
+    source: 'CMS Doctors and Clinicians (National Downloadable File)',
+    claim: `${rows.length} Medicare-enrolled physical therapist${rows.length === 1 ? '' : 's'} listed at this practice address${groups.length ? ` (group: ${groups.slice(0, 2).join('; ')})` : ''}${phones.length ? `; CMS phone ${phones[0]}` : ''}. Medicare enrolment only; says nothing about commercial networks.`,
+    asOf: CMS_RELEASE,
+    url,
+  };
+}

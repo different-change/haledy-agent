@@ -1,0 +1,19 @@
+{
+  "name": "haledy-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8788",
+    "check": "tsc --noEmit",
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "build": "node scripts/build.mjs",
+    "deploy": "npm run build && wrangler deploy",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260917.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.133.0"
+  }
+}

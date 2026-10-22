@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f6f2">
+  <title>Haledy Agent</title>
+  <meta name="description" content="A patient-side agent that finds physical therapy, with the vault encrypted on your device, scoped consent grants, and a live view of exactly what the AI and our server see.">
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/instrument-serif.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/manrope.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <a class="skip-link" href="#conversation">Skip to the conversation</a>
+  <header class="app-header">
+    <div class="brand"><img src="/ladybug.svg" width="52" height="52" alt=""><span>Haledy</span></div>
+    <p class="tagline">Say it once. <em>Your agent does the rest.</em></p>
+    <div class="header-meta">
+      <span id="mode-badge" class="mode-badge" data-mode="idle">Agent mode: not started</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Left: the encrypted vault -->
+    <section class="col col-vault" aria-labelledby="vault-title">
+      <div class="col-head">
+        <h2 id="vault-title">Your vault</h2>
+        <span id="vault-state" class="pill pill-locked">Locked</span>
+      </div>
+      <p class="col-sub">Encrypted on this device with AES-GCM-256. Our server keeps only ciphertext under a random id: no name, no email, no account.</p>
+
+      <div id="start-create" class="card start-card" hidden>
+        <h3>Create a vault</h3>
+        <form id="create-form" class="stack" autocomplete="off">
+          <label class="field-label" for="pass1">Passphrase</label>
+          <input id="pass1" type="password" autocomplete="new-password" minlength="8" required>
+          <label class="field-label" for="pass2">Same passphrase again</label>
+          <input id="pass2" type="password" autocomplete="new-password" minlength="8" required>
+          <button class="button button-dark" type="submit">Create vault <span aria-hidden="true">→</span></button>
+        </form>
+        <div class="start-row">
+          <button id="demo-btn" class="button button-ghost" type="button">Load demo persona</button>
+          <p class="note">Fictional: “Alex Rivera” is not a real person.</p>
+        </div>
+        <button id="passkey-create" class="button button-ghost" type="button" hidden>Use a passkey instead</button>
+      </div>
+
+      <div id="start-unlock" class="card start-card" hidden>
+        <h3>Unlock your vault</h3>
+        <form id="unlock-form" class="stack" autocomplete="off">
+          <label class="field-label" for="unlock-pass">Passphrase</label>
+          <input id="unlock-pass" type="password" autocomplete="current-password" required>
+          <button class="button button-dark" type="submit">Unlock <span aria-hidden="true">→</span></button>
+        </form>
+        <button id="passkey-unlock" class="button button-ghost" type="button" hidden>Unlock with passkey</button>
+      </div>
+
+      <p id="vault-status" class="status" role="status" aria-live="polite"></p>
+
+      <form id="editor" class="editor" hidden>
+        <p id="persona-note" class="persona-note" hidden>Demo persona loaded. Every value is fictional.</p>
+        <div id="editor-fields"></div>
+        <div class="editor-actions" id="editor-actions">
+          <button id="save-btn" class="button button-dark" type="submit">Save <span aria-hidden="true">·</span> encrypt on this device</button>
+          <button id="demo-btn-2" class="button button-ghost" type="button">Load demo persona</button>
+          <p id="save-status" class="save-status" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+
+      <div id="vault-tools" class="vault-tools" hidden>
+        <button id="lock-btn" class="button button-ghost" type="button">Lock</button>
+        <button id="forget-btn" class="button button-danger" type="button">Forget me</button>
+      </div>
+    </section>
+
+    <!-- Centre: the conversation -->
+    <section class="col col-chat" id="conversation" aria-labelledby="chat-title" tabindex="-1">
+      <div class="col-head">
+        <h2 id="chat-title">Say it once</h2>
+      </div>
+      <form id="need-form" class="need-form">
+        <label class="visually-hidden" for="need">What do you need?</label>
+        <textarea id="need" rows="3" maxlength="2000" placeholder="My back hurts, I need physical therapy this week."></textarea>
+        <div class="need-row">
+          <div class="chips" id="chips">
+            <button type="button" class="chip" data-need="My back hurts, I need physical therapy this week.">My back hurts, I need physical therapy this week.</button>
+            <button type="button" class="chip" data-need="I need PT for my knee near home, weekday mornings. Call me at (415) 555-0134.">PT for my knee, with my phone number in it</button>
+          </div>
+          <button id="need-send" class="button button-accent" type="submit">Send <span aria-hidden="true">→</span></button>
+        </div>
+        <p id="need-hint" class="note">Unlock your vault first. Identifiers are removed on this device before anything is sent.</p>
+      </form>
+      <div id="thread" class="thread" aria-live="polite"></div>
+    </section>
+
+    <!-- Right: transparency -->
+    <aside class="col col-glass" aria-labelledby="glass-title">
+      <h2 id="glass-title" class="visually-hidden">Transparency</h2>
+      <div class="tabs" role="tablist" aria-label="Transparency panels">
+        <button class="tab" role="tab" id="tab-audit" aria-controls="panel-audit" aria-selected="true" data-tab="audit">Audit log</button>
+        <button class="tab" role="tab" id="tab-saw" aria-controls="panel-saw" aria-selected="false" tabindex="-1" data-tab="saw">What the AI saw</button>
+        <button class="tab" role="tab" id="tab-server" aria-controls="panel-server" aria-selected="false" tabindex="-1" data-tab="server">What our server holds</button>
+        <button class="tab" role="tab" id="tab-grants" aria-controls="panel-grants" aria-selected="false" tabindex="-1" data-tab="grants">Consent grants <span id="grant-count" class="count" hidden></span></button>
+      </div>
+      <div class="panel" role="tabpanel" id="panel-audit" aria-labelledby="tab-audit">
+        <p class="panel-lede">Every action taken for you, newest first. Field names only, never values.</p>
+        <ol id="audit-list" class="audit-list"></ol>
+      </div>
+      <div class="panel" role="tabpanel" id="panel-saw" aria-labelledby="tab-saw" hidden>
+        <p class="panel-lede">The exact text the model received at each step. <mark class="hl-token">{{tokens}}</mark> stand in for identifiers; <mark class="hl-zip">ZIP</mark> is cut to three digits.</p>
+        <div id="saw-list" class="saw-list"></div>
+      </div>
+      <div class="panel" role="tabpanel" id="panel-server" aria-labelledby="tab-server" hidden>
+        <div id="server-view"></div>
+      </div>
+      <div class="panel" role="tabpanel" id="panel-grants" aria-labelledby="tab-grants" hidden>
+        <p class="panel-lede">What the agent may use, for whom, and until when. Revoke and the next step goes without it.</p>
+        <div id="grant-list" class="grant-list"></div>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>
