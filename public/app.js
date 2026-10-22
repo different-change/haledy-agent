@@ -108,7 +108,8 @@ function releaseValue(name, value) {
 }
 
 const NETWORK = {
-  confirmed: { label: 'In network · confirmed by the payer directory', order: 0 },
+  // A directory listing is evidence, not a benefits check: say what it is.
+  confirmed: { label: 'In a matching network · per the payer’s directory', order: 0 },
   listed: { label: 'Listed by the payer · network not confirmed', order: 1 },
   unverified: { label: 'Network not verified · see evidence', order: 2 },
   not_found: { label: 'Not found in the payer’s directory', order: 3 },
