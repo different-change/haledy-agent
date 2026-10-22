@@ -27,7 +27,7 @@ img{display:block}
 
 /* Shell */
 body{display:grid;grid-template-rows:auto minmax(0,1fr);height:100vh;height:100dvh}
-.app-header{display:flex;align-items:center;gap:28px;padding:12px 32px;border-bottom:1px solid var(--line);background:var(--paper)}
+.app-header{display:flex;align-items:center;gap:28px;padding:12px 32px;border-bottom:1px solid var(--line);background:var(--paper) url(/seedhead.svg) right center/1400px 120px no-repeat}
 .brand{display:flex;align-items:center;gap:12px}
 .brand span{font-family:var(--serif);font-size:2.6rem;letter-spacing:-.04em;line-height:1}
 .tagline{font-family:var(--serif);font-size:1.6rem;line-height:1.15}
