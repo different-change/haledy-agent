@@ -76,12 +76,6 @@ export async function loadGrants(env: AgentEnv, vaultId: string): Promise<Grant[
 
 // ---------- tool schemas (CONTRACT.md "Tools exposed to the model") ----------
 
-const evidenceSchema = {
-  type: 'object',
-  properties: { source: { type: 'string' }, claim: { type: 'string' }, asOf: { type: 'string' }, url: { type: 'string' } },
-  required: ['source', 'claim'],
-};
-
 export const TOOLS = [
   {
     name: 'request_consent',
@@ -141,26 +135,22 @@ export const TOOLS = [
   },
   {
     name: 'present_options',
-    description: 'Finish the run: present ranked options. Rank by network evidence strength (confirmed, listed, unverified, not_found), then ZIP3 proximity, then data freshness. The server attaches full addresses, phones and source evidence by NPI, so keep each option short. State limitations plainly; availability is unknown until a clinic answers.',
+    description: 'Finish the run: present ranked options, at most 8. Rank by network evidence strength (confirmed, listed, unverified, not_found), then ZIP3 proximity, then data freshness. The server attaches addresses, phones and source evidence by NPI, so give only rank, npi, name, network and one short sentence of why for each. State limitations plainly; availability is unknown until a clinic answers.',
     input_schema: {
       type: 'object',
       properties: {
         summary: { type: 'string' },
         options: {
           type: 'array',
-          maxItems: 10,
+          maxItems: 8,
           items: {
             type: 'object',
             properties: {
               rank: { type: 'number' },
               npi: { type: 'string', pattern: '^\\d{10}$' },
               name: { type: 'string' },
-              address: { type: 'string' },
-              zip: { type: 'string' },
-              phone: { type: 'string' },
               network: { type: 'string', enum: ['confirmed', 'listed', 'unverified', 'not_found'] },
-              evidence: { type: 'array', items: evidenceSchema },
-              why: { type: 'string', description: 'One sentence: why this rank.' },
+              why: { type: 'string', description: 'One short sentence: why this rank.' },
             },
             required: ['rank', 'npi', 'name', 'network', 'why'],
           },

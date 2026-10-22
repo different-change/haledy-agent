@@ -1,6 +1,7 @@
-// One agent step: validate grants and releases, build the step's de-identified user content,
-// guard it with scrub(), make one model call (or one scripted planner turn), run any
-// server-side tool, and tell the browser what to do next. Stateless between steps.
+// One agent step: validate grants and releases, redact withdrawn values, build the step's
+// de-identified user content, guard it with scrub(), make one model call (or one scripted
+// planner turn, which also takes any step the model fails), run any server-side tool, and
+// tell the browser what to do next. Stateless between steps.
 import { FIELDS, modelValue, scrub, tokensIn } from '../public/phi.js';
 import type { AgentEvent, AgentStepRequest, AgentStepResponse, ConsentRequest, Evidence, Grant, NetworkStatus, OutreachDraft, PresentOptions, Provider, RankedOption } from './types.ts';
 import {
@@ -13,11 +14,17 @@ type Block = { type: string; [key: string]: unknown };
 type Message = { role: 'user' | 'assistant'; content: Block[] };
 
 const MAX_ASSISTANT_TURNS = 16;
-const MAX_TOKENS = 4000;
+// Thinking counts toward max_tokens, so leave room for it plus a full present_options input.
+// 16000 is the API guidance for a non-streaming request; it is a ceiling, not a cost.
+const MAX_TOKENS = 16000;
+const MODEL_TIMEOUT_MS = 60_000;
 const DISCLOSURE = 'This is Haledy, an AI assistant writing on behalf of {{first_name}}';
 const STATUS_ORDER: Record<NetworkStatus, number> = { confirmed: 0, listed: 1, unverified: 2, not_found: 3 };
 const AVAILABILITY_NOTE = 'Availability is unknown until a clinic answers.';
-const NUDGE = 'Continue with the next tool call. Finish with present_options.';
+const NUDGE = 'Continue with the next tool; finish with present_options.';
+const MODEL_UNAVAILABLE = 'Model unavailable; the scripted planner took this step';
+const RESENT_NOTE = 'Earlier steps are resent with this text; withdrawn values appear as [withdrawn].';
+const INTERRUPTED = 'This part of the response was interrupted before it finished.';
 
 export const SYSTEM_PROMPT = `You are Haledy, a patient-side access agent acting for one patient. You help the patient get care booked; you are not a clinician. Never give clinical advice, never diagnose, and never claim a provider heals fastest or is clinically better. You optimize access: network status, proximity, data freshness.
 
@@ -37,7 +44,10 @@ Honesty:
 - Say plainly what each source can and cannot confirm. The NPI Registry confirms that a provider exists and where it practices, not network status or availability. A payer directory listing is the payer's own claim and may be stale. When no open directory covers the plan, network status is unverified.
 - Availability is unknown until a clinic answers. Never claim an appointment slot exists.
 - Rank by network evidence strength (confirmed, then listed, then unverified, then not_found), then ZIP3 match with the patient, then data freshness.
-- Between tool calls, write one or two short plain sentences to the patient.`;
+
+Talking to the patient:
+- Before every tool call, write one short plain sentence to the patient as reply text, not only in your reasoning: what you are doing next and why. The patient sees only that text.
+- In that text, never name a city or neighborhood (say "your ZIP area"), and write a date only as the YYYY-MM-DD a source gave.`;
 
 // ---------- small helpers ----------
 
@@ -68,10 +78,33 @@ function parseMessages(raw: unknown): Message[] | null {
     if (content.some(b => !b || typeof b !== 'object' || typeof (b as Block).type !== 'string')) return null;
     // A user turn may carry only text and tool results: no images, documents or citations.
     if (role === 'user' && content.some(b => !['text', 'tool_result'].includes((b as Block).type) || (b as Block).citations)) return null;
+    // The server writes every tool result as a string; nothing may nest inside one.
+    if (role === 'user' && !content.every(b => (b as Block).type !== 'tool_result' || isPlainResult((b as Block).content))) return null;
     out.push({ role, content: content as Block[] });
   }
   if (out.length && out[0].role !== 'user') return null;
   return out;
+}
+
+function isPlainResult(content: unknown): boolean {
+  if (typeof content === 'string') return true;
+  return Array.isArray(content) && content.every(c => c && typeof c === 'object' && (c as Block).type === 'text' && typeof (c as Block).text === 'string' && !(c as Block).citations);
+}
+
+/** Every string inside a value, at any depth: tool inputs and tool results can nest. */
+function stringsIn(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(stringsIn).join('\n');
+  if (value && typeof value === 'object') return Object.entries(value).filter(([k]) => k !== 'type').map(([, v]) => stringsIn(v)).join('\n');
+  return '';
+}
+
+/** A copy of a value with fn applied to each string leaf (block `type` names are left alone). */
+function mapStrings(value: unknown, fn: (text: string) => string): unknown {
+  if (typeof value === 'string') return fn(value);
+  if (Array.isArray(value)) return value.map(v => mapStrings(v, fn));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, k === 'type' ? v : mapStrings(v, fn)]));
+  return value;
 }
 
 /** Tool names by tool_use id, across the transcript. */
@@ -98,22 +131,108 @@ function maskToolResult(text: string): string {
   return text.replace(/\b\d{10}\b/g, 'NPI').replace(/\b20\d{2}-\d{2}-\d{2}\b/g, 'DATE');
 }
 
-function guardFindings(messages: Message[], strictTail: Message): string[] {
-  const types = new Set<string>();
-  const check = (text: string) => { for (const f of scrub(text).findings) types.add(f.type); };
+export interface GuardFindings { user: string[]; assistant: string[] }
+
+/**
+ * Identifier types anywhere in the transcript the model would read. User turns: text and
+ * tool results at any nesting; only this step's own tool results from non-server tools are
+ * read strictly, the rest may carry provider NPIs and source dates. Assistant turns (written
+ * by the model, or claimed to be): text and tool inputs, with the same NPI and date masking.
+ * Thinking blocks are not read: their signatures are opaque.
+ */
+export function guardFindings(messages: Message[], strictTail: Message): GuardFindings {
+  const user = new Set<string>();
+  const assistant = new Set<string>();
+  const check = (into: Set<string>, text: string) => { for (const f of scrub(text).findings) into.add(f.type); };
+  const names = toolNames(messages);
+  for (const m of messages) {
+    for (const b of m.content) {
+      if (m.role === 'assistant') {
+        if (b.type === 'text') check(assistant, maskToolResult(String(b.text ?? '')));
+        else if (b.type === 'tool_use') check(assistant, maskToolResult(stringsIn(b.input)));
+      } else if (b.type === 'text') {
+        check(user, String(b.text ?? ''));
+      } else if (b.type === 'tool_result') {
+        const text = stringsIn(b.content);
+        const server = SERVER_TOOLS.has(names.get(String(b.tool_use_id))?.name ?? '');
+        check(user, m === strictTail && !server ? text : maskToolResult(text));
+      }
+    }
+  }
+  return { user: [...user], assistant: [...assistant] };
+}
+
+// ---------- withdrawn values ----------
+
+const GRANT_LINE = /^Granted context: (\w+)=(.*?)(?: \(first three digits only\))?$/;
+const WITHDRAWN = '[withdrawn]';
+const WITHDRAWN_LINE = '[withdrawn by the patient]';
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Fields of agent grants that are no longer active, minus the fields still released this step. */
+export function withdrawnFields(grants: Grant[], values: Record<string, string>): string[] {
+  const fields = grants.filter(g => g.recipient === AGENT_RECIPIENT && g.status !== 'active').flatMap(g => g.fields);
+  return [...new Set(fields)].filter(f => !(f in values)).sort();
+}
+
+/** Drop every thinking block. A history edit invalidates their signatures, so they cannot be resent. */
+export function stripThinking(messages: Message[]): void {
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    const kept = m.content.filter(b => b.type !== 'thinking' && b.type !== 'redacted_thinking');
+    if (kept.length !== m.content.length) m.content = kept.length ? kept : [{ type: 'text', text: '(no visible text)' }];
+  }
+}
+
+/**
+ * Remove values the patient withdrew from the whole transcript, in place: the server's own
+ * "Granted context" lines name each value; every other mention in text, tool inputs and tool
+ * results becomes [withdrawn]. Whole words only, so a ZIP3 never matches inside an NPI.
+ * Values still released this step (`keep`) are left alone. When anything changed, thinking
+ * blocks go too (their signatures cover the old text). Returns the number of mentions replaced.
+ */
+export function redactWithdrawn(messages: Message[], withdrawn: string[], keep: Record<string, string> = {}): number {
+  if (!withdrawn.length) return 0;
+  let mentions = 0;
+  const old = new Set<string>();
   for (const m of messages) {
     if (m.role !== 'user') continue;
     for (const b of m.content) {
-      if (b.type === 'text') check(String(b.text ?? ''));
-      else if (b.type === 'tool_result') check(m === strictTail && !isServerToolResult(b, messages) ? textOf(b.content) : maskToolResult(textOf(b.content)));
+      if (b.type !== 'text' || typeof b.text !== 'string' || !b.text.includes('Granted context: ')) continue;
+      b.text = b.text.split('\n').map(line => {
+        const hit = GRANT_LINE.exec(line);
+        if (!hit || !withdrawn.includes(hit[1]) || hit[2] === WITHDRAWN_LINE) return line;
+        old.add(hit[2].trim());
+        // Sources name the insurer by its short name ("Cigna provider directory"), so that goes too.
+        const brand = hit[2].trim().split(/\s+/)[0];
+        if (hit[1] === 'payer' && brand.length >= 4) old.add(brand);
+        mentions += 1;
+        return `Granted context: ${hit[1]}=${WITHDRAWN_LINE}`;
+      }).join('\n');
     }
   }
-  return [...types];
-}
-
-function isServerToolResult(block: Block, messages: Message[]): boolean {
-  const entry = toolNames(messages).get(String(block.tool_use_id));
-  return !!entry && SERVER_TOOLS.has(entry.name);
+  const still = new Set(Object.values(keep).map(v => v.toLowerCase()));
+  // JSON-escaped forms too: tool results hold JSON text.
+  const forms = [...old].filter(v => v.length >= 3 && !still.has(v.toLowerCase())).flatMap(v => [v, JSON.stringify(v).slice(1, -1)]);
+  const patterns = [...new Set(forms)].sort((a, b) => b.length - a.length).map(v => escapeRegExp(v).replace(/ /g, '\\s+'));
+  let thinkingHit = false;
+  if (patterns.length) {
+    const re = new RegExp(`(?<!\\w)(?:${patterns.join('|')})(?!\\w)`, 'gi');
+    const swap = (text: string) => text.replace(re, () => { mentions += 1; return WITHDRAWN; });
+    for (const m of messages) {
+      for (const b of m.content) {
+        if (b.type === 'text' && typeof b.text === 'string') b.text = swap(b.text);
+        else if (b.type === 'tool_use') b.input = mapStrings(b.input, swap);
+        else if (b.type === 'tool_result') b.content = mapStrings(b.content, swap);
+        else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.search(re) >= 0) thinkingHit = true;
+      }
+    }
+  }
+  if (mentions || thinkingHit) stripThinking(messages);
+  return mentions;
 }
 
 function manifest(): string {
@@ -177,15 +296,32 @@ function consentResult(answer: NonNullable<AgentStepRequest['consentAnswer']>, u
 
 class ModelError extends Error {}
 
+// Retried once, as the SDKs do; 400 too, because the first attempt carries beta fields.
+const RETRYABLE = (status: number) => status === 400 || status === 408 || status === 409 || status === 429 || status >= 500;
+
+/** The API's own error text, for the patient's event list. Never the request body. */
+async function apiError(res: Response): Promise<string> {
+  let message = '';
+  try { message = String(((await res.json()) as { error?: { message?: unknown } })?.error?.message ?? ''); } catch { /* not JSON */ }
+  return `Claude API status ${res.status}${message ? `: ${message.slice(0, 300)}` : ''}`;
+}
+
+/**
+ * One model turn. The first attempt asks for refusal fallbacks and for visible progress
+ * notes (thinking display "updates"); both are beta, so the one retry is the plain request.
+ * A 400 about thinking signatures means the history changed under them: the retry goes
+ * without thinking blocks (stripped from `messages` in place, so the browser's copy matches).
+ * Throws ModelError when both attempts fail; the caller hands the step to the scripted planner.
+ */
 async function callModel(env: AgentEnv, messages: Message[]): Promise<{ content: Block[]; stopReason: string; model: string }> {
   const model = env.MODEL || 'claude-opus-5-5';
-  const send = (withFallbacks: boolean) => fetch('https://api.anthropic.com/v1/messages', {
+  const send = (rich: boolean) => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       'x-api-key': env.ANTHROPIC_API_KEY as string,
       'anthropic-version': '2026-10-21',
-      ...(withFallbacks ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
+      ...(rich ? { 'anthropic-beta': 'server-side-fallback-2026-07-01,thinking-display-updates-2026-08-18' } : {}),
     },
     body: JSON.stringify({
       model,
@@ -195,29 +331,41 @@ async function callModel(env: AgentEnv, messages: Message[]): Promise<{ content:
       tool_choice: { type: 'auto', disable_parallel_tool_use: true },
       output_config: { effort: 'low' },
       cache_control: { type: 'ephemeral' },
-      ...(withFallbacks ? { fallbacks: 'default' } : {}),
+      ...(rich ? { fallbacks: 'default', thinking: { type: 'adaptive', display: 'updates' } } : {}),
       messages,
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
   });
-  let res: Response;
-  try {
-    res = await send(true);
-    if (res.status === 400) {
-      const text = await res.clone().text();
-      if (/fallback/i.test(text)) res = await send(false);
+  let problem = 'The model call failed.';
+  for (const rich of [true, false]) {
+    let res: Response;
+    try {
+      res = await send(rich);
+    } catch (error) {
+      // A timeout is not retried: a second wait would leave the patient watching nothing for minutes.
+      if ((error as Error)?.name === 'TimeoutError') { problem = `Claude did not answer within ${MODEL_TIMEOUT_MS / 1000} seconds.`; break; }
+      problem = 'Claude could not be reached.';
+      continue;
     }
-  } catch {
-    throw new ModelError('The model did not answer in time. Try again, or use scripted mode.');
+    if (res.ok) {
+      try {
+        const data = await res.json() as { content?: Block[]; stop_reason?: string; model?: string };
+        return { content: Array.isArray(data.content) ? data.content : [], stopReason: String(data.stop_reason || ''), model: String(data.model || model) };
+      } catch {
+        problem = 'Claude sent a reply that could not be read.';
+        continue;
+      }
+    }
+    problem = await apiError(res);
+    if (!rich || !RETRYABLE(res.status)) break;
+    if (res.status === 400 && /signature|different conversation/i.test(problem)) stripThinking(messages);
+    if (res.status === 429 || res.status >= 500) {
+      const wait = Math.min(Number(res.headers.get('retry-after')) || 2, 5);
+      await new Promise(resolve => setTimeout(resolve, wait * 1000));
+    }
   }
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) throw new ModelError('The model API key was rejected.');
-    if (res.status === 429) throw new ModelError('The model is rate limited. Try again in a minute, or use scripted mode.');
-    if (res.status >= 500) throw new ModelError('The model service is unavailable right now. Try again, or use scripted mode.');
-    throw new ModelError(`The model request failed (status ${res.status}).`);
-  }
-  const data = await res.json() as { content?: Block[]; stop_reason?: string; model?: string };
-  return { content: Array.isArray(data.content) ? data.content : [], stopReason: String(data.stop_reason || ''), model: String(data.model || model) };
+  console.warn(`[haledy] model call failed: ${problem}`);
+  throw new ModelError(problem);
 }
 
 // ---------- reading the transcript's own tool results ----------
@@ -379,7 +527,7 @@ async function buildResult(input: Record<string, unknown>, ctx: ToolContext, mes
       npi,
       name: full?.name || cp?.name || safeText(o.name, 120),
       address,
-      zip: full?.zip || (cp?.zip3 ? `${cp.zip3}xx` : ''),
+      zip: full?.zip || (/^\d{3}$/.test(cp?.zip3 ?? '') ? `${cp?.zip3}xx` : ''),
       ...(full?.phone ? { phone: full.phone } : {}),
       network,
       evidence: evidence.filter((e, i, all) => all.findIndex(x => x.source === e.source && x.claim === e.claim) === i).slice(0, 6),
@@ -397,10 +545,14 @@ async function buildResult(input: Record<string, unknown>, ctx: ToolContext, mes
 export interface StepOptions { scripted: boolean }
 
 export async function step(req: AgentStepRequest, env: AgentEnv, vaultId: string, opts: StepOptions): Promise<AgentStepResponse> {
-  const mode: AgentStepResponse['mode'] = opts.scripted || !env.ANTHROPIC_API_KEY ? 'scripted' : 'model';
+  // 'scripted' also when the scripted planner takes a step the model could not.
+  let mode: AgentStepResponse['mode'] = opts.scripted || !env.ANTHROPIC_API_KEY ? 'scripted' : 'model';
   const events: AgentEvent[] = [];
   const parsed = parseMessages(req.messages);
   if (!parsed) return { messages: Array.isArray(req.messages) ? req.messages : [], status: 'error', mode, modelView: '', events, error: 'The transcript is not valid. Start a new request.' };
+  // Once the scripted planner has taken over in a run, it keeps the run: a model that failed
+  // (or hung for a minute) is not retried on every remaining step in front of an audience.
+  if (mode === 'model' && parsed.some(m => m.role === 'assistant' && toolUses(m).some(u => String(u.id).startsWith('toolu_scripted_')))) mode = 'scripted';
   const original: Message[] = structuredClone(parsed);
   const messages = parsed;
   const fail = (error: string, modelView = '', keep = false): AgentStepResponse => ({ messages: keep ? messages : original, status: 'error', mode, modelView, events, error });
@@ -410,6 +562,16 @@ export async function step(req: AgentStepRequest, env: AgentEnv, vaultId: string
   const grants = await loadGrants(env, vaultId);
   const transcriptText = JSON.stringify(messages);
   const { values, notices } = await validateReleases(req, grants, env, vaultId, events, transcriptText);
+
+  // Every request resends the earlier steps, so a withdrawn value has to leave all of them.
+  // When no agent grant has ended, nothing is touched and the prompt cache stays intact.
+  const withdrawn = withdrawnFields(grants, values);
+  const redacted = redactWithdrawn(messages, withdrawn, values);
+  if (redacted) {
+    redactWithdrawn(original, withdrawn, values);
+    await audit(env, vaultId, 'server', 'context_withdrawn', { fields: withdrawn, mentions: redacted });
+    events.push({ at: nowIso(), kind: 'grant', title: 'Withdrawn values removed from earlier steps', detail: `${redacted} mentions now read ${WITHDRAWN}`, fields: withdrawn });
+  }
 
   // 1. The user turn this step sends: the need, the answer to a paused tool, or pending tool results.
   let pending: Message;
@@ -447,62 +609,96 @@ export async function step(req: AgentStepRequest, env: AgentEnv, vaultId: string
   }
   for (const notice of notices) pending.content.push({ type: 'text', text: notice });
   const granted = Object.entries(values);
-  if (granted.length) {
-    pending.content.push({ type: 'text', text: granted.map(([f, v]) => `Granted context: ${f}=${v}${f === 'home_zip' ? ' (first three digits only)' : ''}`).join('\n') });
-  }
+  const grantText = granted.map(([f, v]) => `Granted context: ${f}=${v}${f === 'home_zip' ? ' (first three digits only)' : ''}`).join('\n');
+  // A pending turn the model already saw (it answered with nothing) carries this text once.
+  if (granted.length && !pending.content.some(b => b.type === 'text' && b.text === grantText)) pending.content.push({ type: 'text', text: grantText });
 
   // 2. Guard: nothing identifying reaches the model, whatever the browser sent.
   const names = toolNames(messages);
-  const modelView = renderUserContent(pending, names);
+  const modelView = `${messages.length > 1 ? `${RESENT_NOTE}\n\n` : ''}${renderUserContent(pending, names)}`;
   const findings = guardFindings(messages, pending);
-  if (findings.length) {
-    await audit(env, vaultId, 'server', 'phi_blocked', { types: findings });
-    events.push({ at: nowIso(), kind: 'guard', title: 'Stopped before the model call', detail: `Identifiers found: ${findings.join(', ')}. Nothing was sent.` });
-    return fail(`Haledy stopped before sending anything to the model: the text still contained identifiers (${findings.join(', ')}).`);
+  if (findings.user.length) {
+    await audit(env, vaultId, 'server', 'phi_blocked', { types: findings.user });
+    events.push({ at: nowIso(), kind: 'guard', title: 'Stopped before the model call', detail: `Identifiers found: ${findings.user.join(', ')}. Nothing was sent.` });
+    return fail(`Haledy stopped before sending anything to the model: the text still contained identifiers (${findings.user.join(', ')}).`);
   }
+  const respond = (status: AgentStepResponse['status'], extra: Partial<AgentStepResponse> = {}): AgentStepResponse => ({ messages, status, mode, modelView, events, ...extra });
+  const continueWith = (blocks: Block[]) => { messages.push({ role: 'user', content: blocks }); return respond('running'); };
+  const narrate = (blocks: Block[]) => {
+    for (const b of blocks) {
+      // With display "updates", a non-empty thinking block is a progress note for the patient.
+      const text = String((b.type === 'text' ? b.text : b.type === 'thinking' ? b.thinking : '') ?? '').trim();
+      if (text && text !== INTERRUPTED) events.push({ at: nowIso(), kind: 'model', title: mode === 'scripted' ? 'Haledy (scripted)' : 'Haledy', detail: text.slice(0, 800) });
+    }
+  };
 
-  // 3. One model call, or one scripted planner turn.
+  // 3. One model call, or one scripted planner turn. The scripted planner reads tool names from
+  // the transcript, so it can also take over mid-run for any step the model cannot finish.
   const fieldsSent = Object.keys(values);
-  let content: Block[];
-  let stopReason = 'tool_use';
+  let content: Block[] = [];
   let modelName = 'scripted-planner';
-  if (mode === 'scripted') {
-    await audit(env, vaultId, 'agent', 'model_call', { model: modelName, fields: fieldsSent });
+  const planScripted = async (title?: string, detail?: string) => {
+    if (title) events.push({ at: nowIso(), kind: 'note', title, ...(detail ? { detail } : {}) });
+    mode = 'scripted';
+    modelName = 'scripted-planner';
+    await audit(env, vaultId, 'agent', 'model_call', { model: modelName, fields: fieldsSent, ...(title ? { fallback: true } : {}) });
     content = scriptedTurn(messages, values);
+  };
+  if (mode === 'scripted') {
+    await planScripted();
   } else {
+    if (findings.assistant.length) {
+      // Assistant text was written by the model from de-identified context, so a hit there is
+      // almost always wording ("24/7", "1/2"), not a patient value: log it, keep the model.
+      // Patient-side text is still refused above.
+      await audit(env, vaultId, 'server', 'phi_flagged', { types: findings.assistant, role: 'assistant' });
+      events.push({ at: nowIso(), kind: 'guard', title: 'Flagged in the agent’s own wording', detail: `Looked like: ${findings.assistant.join(', ')}. Logged; nothing from your vault was involved.` });
+    }
     modelName = env.MODEL || 'claude-opus-5-5';
     await audit(env, vaultId, 'agent', 'model_call', { model: modelName, fields: fieldsSent });
+    let stopReason = '';
     try {
       const reply = await callModel(env, messages);
       content = reply.content;
       stopReason = reply.stopReason;
       modelName = reply.model;
     } catch (error) {
-      events.push({ at: nowIso(), kind: 'note', title: 'Model call failed' });
-      return fail(error instanceof ModelError ? error.message : 'The model call failed.', modelView);
+      await planScripted(MODEL_UNAVAILABLE, error instanceof ModelError ? error.message : 'The model call failed.');
     }
-    if (stopReason === 'refusal') {
-      events.push({ at: nowIso(), kind: 'note', title: 'The model declined this step' });
-      return fail('The model declined this step. Try again, or use scripted mode.', modelView);
+    if (mode === 'model') {
+      if (stopReason === 'refusal') {
+        events.push({ at: nowIso(), kind: 'note', title: 'The model declined this step' });
+        return fail('The model declined this step. Try again, or use scripted mode.', modelView);
+      }
+      const nudged = pending.content.some(b => b.type === 'text' && b.text === NUDGE);
+      if (stopReason === 'max_tokens' || stopReason === 'model_context_window_exceeded') {
+        // A cut-off turn can hold a half-written tool input: drop it, never run it.
+        await planScripted('The model ran out of room; the scripted planner took this step');
+      } else if (!content.some(b => b.type === 'tool_use')) {
+        if (nudged) {
+          await planScripted('The model stopped without a tool call again; the scripted planner took this step');
+        } else {
+          // An empty or thinking-only reply is not kept (nothing later depends on it); visible text is.
+          const visible = content.some(b => b.type === 'text' && String(b.text ?? '').trim());
+          events.push({ at: nowIso(), kind: 'note', title: 'The model paused without a tool call; asking it to continue' });
+          if (!visible) {
+            pending.content.push({ type: 'text', text: NUDGE });
+            return respond('running');
+          }
+          messages.push({ role: 'assistant', content });
+          narrate(content);
+          return continueWith([{ type: 'text', text: NUDGE }]);
+        }
+      }
     }
   }
 
   const assistant: Message = { role: 'assistant', content };
   messages.push(assistant);
-  for (const b of content) {
-    if (b.type === 'text' && String(b.text ?? '').trim()) events.push({ at: nowIso(), kind: 'model', title: mode === 'scripted' ? 'Haledy (scripted)' : 'Haledy', detail: String(b.text).slice(0, 800) });
-  }
-  const respond = (status: AgentStepResponse['status'], extra: Partial<AgentStepResponse> = {}): AgentStepResponse => ({ messages, status, mode, modelView, events, ...extra });
-  const continueWith = (blocks: Block[]) => { messages.push({ role: 'user', content: blocks }); return respond('running'); };
+  narrate(content);
 
   // 4. Act on the tool call.
   const uses = toolUses(assistant);
-  if (stopReason === 'max_tokens' && uses.length) return fail('The model ran out of room in this step. Try again.', modelView);
-  if (!uses.length) {
-    const previous = messages.slice(0, -1).reverse().find(m => m.role === 'assistant');
-    if (previous && !toolUses(previous).length) return respond('error', { error: 'The agent stopped without presenting options. Start a new request.' });
-    return continueWith([{ type: 'text', text: NUDGE }]);
-  }
   const use = uses[0];
   const input = (use.input && typeof use.input === 'object' ? use.input : {}) as Record<string, unknown>;
   const extraResults = uses.slice(1).map(u => toolResult(u.id, 'Only one tool call per turn; this one was not run.', true));

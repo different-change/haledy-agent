@@ -55,13 +55,16 @@ export function modelValue(name, value) {
 }
 
 const PATTERNS = [
+  // First, so a house number is not read as a ZIP or a date. The capitalised street name
+  // keeps it from matching phrases like "2 miles each way".
+  { type: 'address', safeHarbor: 'B · Geography smaller than a state', re: /\b\d{1,5}\s+(?:(?:[A-Z][a-z]+|\d{1,3}(?:st|nd|rd|th))\s+){1,3}(?:St|Street|Ave|Avenue|Blvd|Boulevard|Rd|Road|Dr|Drive|Way|Ln|Lane|Ct|Court|Pl|Place)\b\.?/g },
   { type: 'email', safeHarbor: 'F · Email addresses', re: /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi },
   { type: 'ssn', safeHarbor: 'G · Social Security numbers', re: /\b\d{3}-\d{2}-\d{4}\b/g },
   { type: 'phone', safeHarbor: 'D · Telephone numbers', re: /(?:\+?1[\s.-]?)?\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g },
   { type: 'url', safeHarbor: 'N · URLs', re: /\bhttps?:\/\/\S+/gi },
   { type: 'ip', safeHarbor: 'O · IP addresses', re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
   { type: 'date', safeHarbor: 'C · Dates', re: /\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}\/\d{1,2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*(?:,?\s+\d{4})?)\b/gi },
-  { type: 'city', safeHarbor: 'B · Geography smaller than a state', re: new RegExp(`\\b(?:${CITIES.sort((a, b) => b.length - a.length).join('|')})\\b`, 'g') },
+  { type: 'city', safeHarbor: 'B · Geography smaller than a state', re: new RegExp(`\\b(?:${CITIES.sort((a, b) => b.length - a.length).join('|')})\\b`, 'gi') },
   { type: 'zip', safeHarbor: 'B · Geography smaller than a state', re: /\b\d{5}(?:-\d{4})?\b/g },
   { type: 'id-number', safeHarbor: 'I/J/R · Member, account or other ID numbers', re: /\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9-]{8,20}\b/g },
   { type: 'long-number', safeHarbor: 'R · Other unique numbers', re: /\b\d{8,}\b/g },

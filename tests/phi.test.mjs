@@ -106,3 +106,23 @@ test('tokensIn lists each token once', () => {
   assert.deepEqual(tokensIn('{{first_name}} {{member_id}} {{first_name}}'), ['first_name', 'member_id']);
   assert.deepEqual(tokensIn('no tokens'), []);
 });
+
+test('scrub removes city names in any case', () => {
+  for (const text of ['I need PT in sf this week', 'I live in san francisco', 'near Daly City']) {
+    assert.ok(types(text).includes('city'), text);
+  }
+});
+
+test('scrub removes street addresses but not distances or frequencies', () => {
+  for (const text of ['near 1640 Valencia St', 'at 500 3rd St', '2001 Van Ness Ave.', '1 Market Street']) {
+    assert.ok(types(text).includes('address'), text);
+  }
+  for (const text of ['2 miles each way', 'I can do 3 days a week', '30 minutes by transit', 'PT 2-3 times a week']) {
+    assert.deepEqual(types(text), [], text);
+  }
+});
+
+test('scrub keeps restricted ZIP3 prefixes and the 941 area straight', () => {
+  assert.equal(zip3('94110'), '941');
+  for (const zip of ['03601', '06390', '79012', '83001', '83101']) assert.equal(zip3(zip), '000', zip);
+});

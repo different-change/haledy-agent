@@ -78,7 +78,34 @@ const FINDING_LABELS = {
   phone: 'phone number', email: 'email address', member_id: 'member ID', group_number: 'group number',
   ssn: 'Social Security number', url: 'web address', ip: 'IP address', date: 'date',
   zip: 'ZIP code (cut to 3 digits)', 'id-number': 'ID number', 'long-number': 'long number',
+  city: 'city name', address: 'street address',
 };
+
+// The patient's own identifiers, so scrub() can catch a name no pattern would recognise.
+function knownIds() {
+  const known = {};
+  for (const name of TOKEN_FIELDS) if (state.profile[name]) known[name] = state.profile[name];
+  return known;
+}
+
+// scrub() with the patient's identifiers, plus each part of the full name on its own,
+// so "ask for Rivera" is caught as well as "Alex Rivera".
+function scrubKnown(text) {
+  let result = scrub(text, knownIds());
+  const first = String(state.profile.first_name || '').trim().toLowerCase();
+  for (const word of String(state.profile.full_name || '').split(/[\s,.-]+/)) {
+    if (word.length < 2 || word.toLowerCase() === first) continue;
+    const more = scrub(result.text, { full_name: word });
+    result = { text: more.text, findings: result.findings.concat(more.findings) };
+  }
+  return result;
+}
+
+// What a consented field releases: its Safe Harbor form, with any identifier typed into it removed.
+function releaseValue(name, value) {
+  const mv = modelValue(name, value);
+  return mv == null ? null : scrubKnown(mv).text;
+}
 
 const NETWORK = {
   confirmed: { label: 'In network · confirmed by the payer directory', order: 0 },
@@ -124,6 +151,8 @@ async function api(method, path, body) {
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (state.vaultId) headers['X-Vault'] = state.vaultId;
+  // Stage fallback: ?scripted runs the deterministic planner even when a model key is set.
+  if (path === '/api/agent/step' && new URLSearchParams(location.search).has('scripted')) headers['X-Haledy-Mode'] = 'scripted';
   const res = await fetch(path, {
     method, headers, cache: 'no-store', credentials: 'same-origin',
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -413,7 +442,7 @@ function setMode(mode) {
   state.mode = mode;
   const el = $('mode-badge');
   el.dataset.mode = mode || 'idle';
-  el.textContent = mode === 'model' ? 'Agent: Claude' : mode === 'scripted' ? 'Agent: Scripted planner (no model key)' : 'Agent mode: not started';
+  el.textContent = mode === 'model' ? 'Agent: Claude' : mode === 'scripted' ? 'Agent: Scripted planner (backup)' : 'Agent mode: not started';
 }
 
 function thread() { return $('thread'); }
@@ -477,11 +506,17 @@ function addEvents(events) {
   addToThread(list);
 }
 
+const INTERRUPTED = 'This part of the response was interrupted before it finished.';
+
 function assistantText(message) {
   if (!message || message.role !== 'assistant') return '';
   if (typeof message.content === 'string') return message.content;
   if (!Array.isArray(message.content)) return '';
-  return message.content.filter(b => b && b.type === 'text' && b.text).map(b => b.text).join('\n\n');
+  // Progress notes can arrive as summarized thinking blocks; show those too, never empty ones.
+  return message.content
+    .map(b => (b && b.type === 'text' ? b.text : b && b.type === 'thinking' ? b.thinking : '') || '')
+    .filter(t => t.trim() && t.trim() !== INTERRUPTED)
+    .join('\n\n');
 }
 
 function renderNewAssistantText() {
@@ -501,7 +536,7 @@ function buildReleases() {
     if (live) {
       const values = {};
       for (const field of g.fields || []) {
-        const v = modelValue(field, state.profile[field]);
+        const v = releaseValue(field, state.profile[field]);
         if (v != null) values[field] = v;
       }
       out.push({ grantId: g.id, values });
@@ -571,9 +606,7 @@ async function onNeed(e) {
   if (!state.key || state.busy) return;
   const raw = $('need').value.trim();
   if (!raw) return;
-  const known = {};
-  for (const name of TOKEN_FIELDS) if (state.profile[name]) known[name] = state.profile[name];
-  const { text, findings } = scrub(raw, known);
+  const { text, findings } = scrubKnown(raw);
   resetRun();
   addPatientBubble(raw, text);
   if (findings.length) {
@@ -593,7 +626,7 @@ function renderConsent(req) {
     const field = FIELDS[name];
     const id = `c-${req.toolUseId}-${name}`.replace(/[^\w-]/g, '_');
     const value = state.profile[name];
-    const mv = field ? modelValue(name, value) : null;
+    const mv = field ? releaseValue(name, value) : null;
     let grantable = !!field && field.model !== 'never' && mv != null;
     let sees;
     if (!field) {
@@ -651,7 +684,7 @@ function renderConsent(req) {
       const grant = await api('POST', '/api/grants', { fields: chosen, recipient: AGENT, purpose: req.purpose || 'Find care', ttlMinutes: Number(ttl.value) });
       upsertGrant(grant);
       renderGrants();
-      const shown = chosen.map(n => `${fieldLabel(n)} as “${modelValue(n, state.profile[n])}”`).join(', ');
+      const shown = chosen.map(n => `${fieldLabel(n)} as “${releaseValue(n, state.profile[n])}”`).join(', ');
       finish(`Granted for ${ttl.value} minutes: ${shown}. Revoke any time in Consent grants.`);
       await runSteps({ consentAnswer: { toolUseId: req.toolUseId, grantId: grant.id } });
     } catch (err) {
@@ -843,7 +876,7 @@ function renderSaw() {
   }
   for (const v of [...state.views].reverse()) {
     root.append(h('article', { class: 'saw-item' },
-      h('h4', { text: `Exactly what the model received at ${clock(v.at)} · step ${v.step}${v.mode === 'scripted' ? ' · scripted planner' : ''}` }),
+      h('h4', { text: `New text sent to the model at ${clock(v.at)} · step ${v.step}${v.mode === 'scripted' ? ' · scripted planner' : ''} · earlier steps are resent with it` }),
       h('pre', null, highlighted(v.text))));
   }
 }
@@ -994,7 +1027,7 @@ function renderGrants() {
     const revoke = isLive ? h('button', { class: 'button button-danger button-small', type: 'button', text: 'Revoke' }) : null;
     if (revoke) revoke.addEventListener('click', () => revokeGrant(g, revoke));
     const fields = (g.fields || []).map(n => {
-      const mv = state.key ? modelValue(n, state.profile[n]) : null;
+      const mv = state.key ? releaseValue(n, state.profile[n]) : null;
       return mv != null ? `${fieldLabel(n)} (as “${mv}”)` : fieldLabel(n);
     }).join(', ');
     root.append(h('article', { class: 'grant', dataset: { status } },
@@ -1019,7 +1052,7 @@ async function revokeGrant(grant, button) {
       addToThread(h('ul', { class: 'events' }, h('li', { class: 'event' },
         h('span', { class: 'kind kind-grant', text: 'Grant' }),
         h('span', { class: 'event-body' }, h('strong', { text: 'You revoked a grant.' }),
-          ' ', h('span', { class: 'event-detail', text: `· the next step goes without: ${(grant.fields || []).map(fieldLabel).join(', ')}` })))));
+          ' ', h('span', { class: 'event-detail', text: `· from the next step, earlier mentions are replaced with [withdrawn] and the agent is told to stop using: ${(grant.fields || []).map(fieldLabel).join(', ')}` })))));
     }
     refreshServerView();
     pollAudit();

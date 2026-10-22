@@ -14,9 +14,29 @@ const JSON_HEADERS = {
 const SMALL_LIMIT = 16 * 1024;
 const STEP_LIMIT = 64 * 1024;
 const DEVICE_ACTIONS = new Set(['vault_unlocked', 'tokens_filled', 'scrubbed_locally', 'consent_denied']);
+const MODEL_CALLS_PER_HOUR = 40;
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), { status, headers: { ...JSON_HEADERS, ...extra } });
+}
+
+const tooMany = (error: string, retryAfter = 60) => json({ error }, 429, { 'Retry-After': String(retryAfter) });
+const clientIp = (request: Request) => request.headers.get('CF-Connecting-IP') || 'local';
+
+// Only the rate limiter sees the key (a client IP or a vault id); it is never stored or logged.
+// A limiter outage fails open: the API key's own spend limit is the backstop.
+async function limited(limiter: RateLimit, key: string): Promise<boolean> {
+  try { return !(await limiter.limit({ key })).success; } catch { return false; }
+}
+
+/** Seconds until this vault may call the model again, or 0 while it is under its hourly cap. */
+async function hourlyWait(env: AgentEnv, vaultId: string): Promise<number> {
+  const since = new Date(Date.now() - 3_600_000).toISOString();
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM audit
+    WHERE vault_id = ? AND action = 'model_call' AND created_at > ? AND detail NOT LIKE '%"model":"scripted-planner"%'`)
+    .bind(vaultId, since).first<{ n: number; oldest: string | null }>();
+  if (!row || row.n < MODEL_CALLS_PER_HOUR) return 0;
+  return Math.max(1, Math.ceil((Date.parse(row.oldest ?? '') + 3_600_000 - Date.now()) / 1000)) || 60;
 }
 
 class HttpError extends Error {
@@ -97,6 +117,7 @@ async function route(request: Request, env: AgentEnv, url: URL): Promise<Respons
 
   if (path === '/api/vault') {
     if (method === 'POST') {
+      if (await limited(env.VAULT_IP_LIMITER, clientIp(request))) return tooMany('A few too many new vaults. Please try again in a minute.');
       const fields = vaultFields(await readBody(request, SMALL_LIMIT));
       const id = randomHex(32);
       await env.DB.prepare('INSERT INTO vaults (id, ciphertext, iv, kdf) VALUES (?, ?, ?, ?)').bind(id, fields.ciphertext, fields.iv, fields.kdf).run();
@@ -200,11 +221,18 @@ async function route(request: Request, env: AgentEnv, url: URL): Promise<Respons
 
   if (path === '/api/agent/step') {
     if (method !== 'POST') return json({ error: 'Method not allowed.' }, 405, { Allow: 'POST' });
+    if (await limited(env.STEP_IP_LIMITER, clientIp(request))) return tooMany('Too many steps. Please wait a minute.');
     const vault = await vaultFromHeader(request, env);
+    if (await limited(env.STEP_VAULT_LIMITER, vault.id)) return tooMany('Too many steps for this vault. Please wait a minute.');
     const data = await readBody(request, STEP_LIMIT);
     if (!Array.isArray(data.messages) || !Array.isArray(data.releases ?? [])) return json({ error: 'Please check your request and try again.' }, 400);
-    const scripted = (request.headers.get('X-Haledy-Mode') || '').toLowerCase() === 'scripted';
+    let scripted = (request.headers.get('X-Haledy-Mode') || '').toLowerCase() === 'scripted';
+    // Scripted steps never call the model, so only model steps count against the hourly cap.
+    // Over the cap, the run carries on with the scripted planner instead of stopping mid-demo.
+    let capped = false;
+    if (!scripted && env.ANTHROPIC_API_KEY && await hourlyWait(env, vault.id)) scripted = capped = true;
     const result = await step({ ...(data as unknown as AgentStepRequest), releases: (data.releases as AgentStepRequest['releases']) || [] }, env, vault.id, { scripted });
+    if (capped) result.events.unshift({ at: new Date().toISOString(), kind: 'note', title: 'This vault reached its hourly limit of model calls; the scripted planner took this step' });
     return json(result);
   }
 
